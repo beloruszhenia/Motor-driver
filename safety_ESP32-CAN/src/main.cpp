@@ -5,6 +5,11 @@
  * - Device ID 0x01: Safety Device 1 (e.g., Left/Yaw Limit)
  * - Device ID 0x02: Safety Device 2 (e.g., Up/Pitch Limit)
  * 
+ * LED Indicators:
+ * - Red LED: Min limit warnings (solid or blink)
+ * - Green LED: Max limit warnings (solid or blink)
+ * - Alternating Red/Green (2 Hz): CAN communication error
+ * 
  * Board: Wemos/Lolin S2 Mini (ESP32-S2FN4R2)
  * Framework: PlatformIO (Arduino Core)
  * CAN: Internal TWAI (Two-Wire Automotive Interface)
@@ -12,6 +17,7 @@
 
 #include <Arduino.h>
 #include "driver/twai.h"
+#include "esp_task_wdt.h"
 
 // CAN Configuration
 #define CAN_ID_SAFETY       0x005
@@ -22,14 +28,36 @@
 #define STATUS_LIMIT1_FIND  0x11
 #define STATUS_LIMIT2_FIND  0x12
 
-// CAN Bitrate: 500 kbps (matching Orin NX)
+// CAN Bitrate configuration (set via build flags)
+// Options: 250, 500, 800, 1000 kbps
+#ifndef CAN_SPEED_KBPS
+#define CAN_SPEED_KBPS      500  // Default: 500 kbps
+#endif
+
+#if CAN_SPEED_KBPS == 1000
+#define CAN_BITRATE         TWAI_TIMING_CONFIG_1MBITS()
+#define CAN_BITRATE_STR     "1 Mbps"
+#elif CAN_SPEED_KBPS == 800
+#define CAN_BITRATE         TWAI_TIMING_CONFIG_800KBITS()
+#define CAN_BITRATE_STR     "800 kbps"
+#elif CAN_SPEED_KBPS == 500
 #define CAN_BITRATE         TWAI_TIMING_CONFIG_500KBITS()
+#define CAN_BITRATE_STR     "500 kbps"
+#elif CAN_SPEED_KBPS == 250
+#define CAN_BITRATE         TWAI_TIMING_CONFIG_250KBITS()
+#define CAN_BITRATE_STR     "250 kbps"
+#elif CAN_SPEED_KBPS == 125
+#define CAN_BITRATE         TWAI_TIMING_CONFIG_125KBITS()
+#define CAN_BITRATE_STR     "125 kbps"
+#else
+#error "Unsupported CAN_SPEED_KBPS value. Use: 125, 250, 500, 800, or 1000"
+#endif
 
 // Heartbeat interval: 5000 ms (5 seconds)
 #define HEARTBEAT_INTERVAL  5000
 
 // Debounce time: 50ms (stable state required)
-#define DEBOUNCE_TIME       50
+#define DEBOUNCE_TIME       10
 
 // Watchdog timeout: 2 seconds
 #define WDT_TIMEOUT_MS      2000
@@ -42,6 +70,9 @@
 
 // LED blink interval
 #define LED_BLINK_INTERVAL   500  // 500ms blink period
+
+// Debug output (set to 0 to disable)
+#define ENABLE_DEBUG_OUTPUT  1
 
 // Device configuration (set via build flags)
 #ifndef DEVICE_ID
@@ -69,6 +100,12 @@ bool red_blink_mode = false;
 bool green_blink_mode = false;
 bool limit1_find_sent = false;  // Track if Limit1 Find was sent
 bool limit2_find_sent = false;  // Track if Limit2 Find was sent
+
+// CAN error state
+bool can_error_mode = false;
+uint8_t can_error_count = 0;
+unsigned long last_can_error_blink = 0;
+bool can_error_led_toggle = false;
 
 // TWAI message structure
 twai_message_t tx_message;
@@ -99,8 +136,8 @@ void setupTWAI() {
     }
   }
   
-  // Start TWAI driver
-  result = twai_driver_start();
+  // Start TWAI driver (note: in some ESP32 versions, this is done automatically)
+  result = twai_start();
   if (result != ESP_OK) {
     Serial.printf("Failed to start TWAI driver: %s\n", esp_err_to_name(result));
     while (1) {
@@ -154,9 +191,23 @@ bool sendCANMessage(uint32_t can_id, uint8_t* data, uint8_t data_len) {
       if (i < data_len - 1) Serial.print(" ");
     }
     Serial.println("]");
+    
+    // Reset error counter on successful transmission
+    can_error_count = 0;
+    if (can_error_mode) {
+      can_error_mode = false;
+      Serial.println("CAN communication restored");
+    }
     return true;
   } else {
     Serial.printf("Failed to send CAN message: %s\n", esp_err_to_name(result));
+    
+    // Increment error counter
+    can_error_count++;
+    if (can_error_count >= 3 && !can_error_mode) {
+      can_error_mode = true;
+      Serial.println("CAN ERROR MODE: 3+ consecutive failures");
+    }
     return false;
   }
 }
@@ -186,10 +237,29 @@ int readHallSensor() {
 }
 
 /**
- * Update LED states based on Hall sensor value (non-blocking)
+ * Update LED states based on Hall sensor value or CAN error (non-blocking)
  */
 void updateLEDs(int hall_value) {
   unsigned long current_time = millis();
+  
+  // CAN ERROR MODE: Alternate red/green blinking at 2 Hz (250ms per LED)
+  if (can_error_mode) {
+    if (current_time - last_can_error_blink >= 250) {
+      can_error_led_toggle = !can_error_led_toggle;
+      last_can_error_blink = current_time;
+    }
+    
+    if (can_error_led_toggle) {
+      digitalWrite(LED_RED_PIN, HIGH);
+      digitalWrite(LED_GREEN_PIN, LOW);
+    } else {
+      digitalWrite(LED_RED_PIN, LOW);
+      digitalWrite(LED_GREEN_PIN, HIGH);
+    }
+    return;  // Skip normal LED logic in error mode
+  }
+  
+  // NORMAL MODE: Hall sensor based LED control
   bool led_update_due = (current_time - last_led_update >= LED_BLINK_INTERVAL / 2);
   
   // Determine LED states based on thresholds
@@ -237,6 +307,46 @@ void updateLEDs(int hall_value) {
 }
 
 /**
+ * Debug output for Hall sensor and threshold events
+ */
+void debugPrintHallSensor(int hall_value, const char* event = nullptr) {
+#if ENABLE_DEBUG_OUTPUT
+  static unsigned long last_print = 0;
+  static int last_printed_value = -1;
+  unsigned long current_time = millis();
+  
+  // Print ADC value every 500ms OR when event occurs
+  bool should_print = (current_time - last_print >= 500) || (event != nullptr);
+  
+  if (should_print) {
+    Serial.printf("[ADC: %4d] ", hall_value);
+    
+    // Print zone information
+    if (hall_value < HALL_RED_ON_THRESHOLD) {
+      Serial.print("RED_ON (Min Limit) ");
+    } else if (hall_value < HALL_RED_BLINK_THRESHOLD) {
+      Serial.print("RED_BLINK (Approaching Min) ");
+    } else if (hall_value > HALL_GREEN_ON_THRESHOLD) {
+      Serial.print("GREEN_ON (Max Limit) ");
+    } else if (hall_value > HALL_GREEN_BLINK_THRESHOLD) {
+      Serial.print("GREEN_BLINK (Approaching Max) ");
+    } else {
+      Serial.print("NORMAL ");
+    }
+    
+    // Print event if any
+    if (event != nullptr) {
+      Serial.printf(">>> EVENT: %s", event);
+    }
+    
+    Serial.println();
+    last_print = current_time;
+    last_printed_value = hall_value;
+  }
+#endif
+}
+
+/**
  * Check Hall sensor and send CAN messages if thresholds crossed
  */
 void checkHallSensor() {
@@ -244,7 +354,7 @@ void checkHallSensor() {
   unsigned long current_time = millis();
   
   // Debounce: only check if enough time has passed
-  if (current_time - last_hall_read < 50) {  // 50ms debounce
+  if (current_time - last_hall_read < DEBOUNCE_TIME) {  // 50ms debounce
     return;
   }
   last_hall_read = current_time;
@@ -262,6 +372,7 @@ void checkHallSensor() {
     if (last_hall_value >= HALL_RED_ON_THRESHOLD) {
       // Just entered red zone (min limit fully triggered)
       sendLimitSwitchMessage(current_device_id, STATUS_MIN_LIMIT);
+      debugPrintHallSensor(hall_value, "MIN_LIMIT triggered (0x10)");
       limit1_find_sent = false;  // Reset when min limit is reached
     }
   }
@@ -272,6 +383,7 @@ void checkHallSensor() {
       // Just entered red blink zone (approaching min limit)
       if (!limit1_find_sent) {
         sendLimitSwitchMessage(current_device_id, STATUS_LIMIT1_FIND);
+        debugPrintHallSensor(hall_value, "LIMIT1_FIND - approaching min (0x11)");
         limit1_find_sent = true;
       }
     }
@@ -288,6 +400,7 @@ void checkHallSensor() {
       // Just entered green blink zone (approaching max limit)
       if (!limit2_find_sent) {
         sendLimitSwitchMessage(current_device_id, STATUS_LIMIT2_FIND);
+        debugPrintHallSensor(hall_value, "LIMIT2_FIND - approaching max (0x12)");
         limit2_find_sent = true;
       }
     }
@@ -303,6 +416,7 @@ void checkHallSensor() {
     if (last_hall_value <= HALL_GREEN_ON_THRESHOLD) {
       // Just entered green zone (max limit fully triggered)
       sendLimitSwitchMessage(current_device_id, STATUS_MAX_LIMIT);
+      debugPrintHallSensor(hall_value, "MAX_LIMIT triggered (0x20)");
       limit2_find_sent = false;  // Reset when max limit is reached
     }
   }
@@ -311,6 +425,9 @@ void checkHallSensor() {
   
   // Update LEDs
   updateLEDs(hall_value);
+  
+  // Regular ADC readout
+  debugPrintHallSensor(hall_value);
 }
 
 
@@ -323,6 +440,7 @@ void setup() {
   
   Serial.println("ESP32-S2 Safety Node Starting...");
   Serial.printf("Device ID: 0x%02X\n", current_device_id);
+  Serial.printf("CAN Bitrate: %s\n", CAN_BITRATE_STR);
   
   // Configure pins
   pinMode(HALL_SENSOR_PIN, INPUT);  // ADC input
