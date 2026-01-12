@@ -1,0 +1,11 @@
+{
+  "position_offset": -35.69049072265625,
+  "position_min_limit": -0.6441788499002854,
+  "position_max_limit": 0.6441788499002854,
+  "position_limits_enabled": true,
+  "limit_find_speed_rads": 3,
+  "can_id": 10,
+  "interface": "can0",
+  "position_border_min_limit": -0.7314453125,
+  "position_border_max_limit": 0.7314453125
+}

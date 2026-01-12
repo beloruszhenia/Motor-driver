@@ -1,0 +1,67 @@
+# Firmware: Safety Node (ESP32 S2 Mini)
+
+## 1. Hardware Context
+
+- **Board:** Wemos/Lolin S2 Mini (ESP32-S2FN4R2).
+- **Framework:** PlatformIO (Arduino Core).
+- **Peripherals:**
+  - **CAN:** Internal TWAI (Two-Wire Automotive Interface). _Requires external Transceiver._
+  - **Inputs:** 2x Mechanical Limit Switches (Internal Pull-up, Active Low).
+  - **Status LED:** Onboard LED (usually GPIO 15) for Heartbeat visualization.
+
+## 2. Pin Configuration (Default Recommendation)
+
+- **CAN TX:** GPIO 5
+- **CAN RX:** GPIO 3
+- **Limit Switch 1:** GPIO 7
+- **Limit Switch 2:** GPIO 9
+- _Note:_ ESP32-S2 allows PIN matrix remapping, but strictly define these in code constants.
+
+## 3. Firmware Logic Rules
+
+The firmware must implement a non-blocking loop (no `delay()`).
+
+### A. CAN Configuration
+
+- **Library:** Use built-in `driver/twai.h` or `ESP32-TWAI-CAN` library.
+- **Bitrate:** Must match Orin NX setting (**500 kbps**).
+- **Mode:** Normal Mode.
+
+### B. Protocol Implementation (As defined in Safety Protocol)
+
+- **Device ID:** Configurable via Macros (e.g., `#define DEVICE_ID 0x01`).
+
+#### Task 1: Heartbeat Generator
+
+- **Frequency:** Every **5000 ms** (5 seconds).
+- **Packet:** `ID: 0x005` | Payload: `[DEVICE_ID]` (Length: 1).
+- **Visual:** Blink LED briefly on send.
+
+#### Task 2: Limit Switch Monitor (Interrupt/Polling)
+
+- **Debounce:** Implement software debounce (min 20-50ms stable state).
+- **Trigger Logic:**
+  - IF Switch 1 goes LOW (Active) -> Send `ID: 0x005` | Payload: `[DEVICE_ID, 0x10]`
+  - IF Switch 2 goes LOW (Active) -> Send `ID: 0x005` | Payload: `[DEVICE_ID, 0x20]`
+- **Priority:** Send immediately upon detection (bypass Heartbeat timer).
+
+### C. Failsafe Features
+
+- **Watchdog:** Enable Hardware WDT (restart if loop hangs > 2s).
+- **Bus Recovery:** If CAN bus goes "Bus-Off" (too many errors), auto-recover after 100ms.
+
+## 4. PlatformIO `platformio.ini` Template
+
+```ini
+[env:lolin_s2_mini]
+platform = espressif32
+board = lolin_s2_mini
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+    # Use lightweight TWAI wrapper or native driver
+build_flags =
+    -D CORE_DEBUG_LEVEL=0
+    -D CONFIG_TWAI_TX_PIN=5
+    -D CONFIG_TWAI_RX_PIN=3
+```

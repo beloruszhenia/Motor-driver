@@ -1,0 +1,43 @@
+#######################################
+# Syntax Coloring Map for motctrl_prot
+#######################################
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+MCReqResetConfiguration	KEYWORD2
+MCResResetConfiguration	KEYWORD2
+MCReqRefreshConfiguration	KEYWORD2
+MCResRefreshConfiguration	KEYWORD2
+MCReqModifyConfiguration	KEYWORD2
+MCResModifyConfiguration	KEYWORD2
+MCReqRetrieveConfiguration	KEYWORD2
+MCResRetrieveConfiguration	KEYWORD2
+MCReqStartMotor	KEYWORD2
+MCResStartMotor	KEYWORD2
+MCReqStopMotor	KEYWORD2
+MCResStopMotor	KEYWORD2
+MCReqTorqueControl	KEYWORD2
+MCResTorqueControl	KEYWORD2
+MCReqSpeedControl	KEYWORD2
+MCResSpeedControl	KEYWORD2
+MCReqPositionControl	KEYWORD2
+MCResPositionControl	KEYWORD2
+MCReqStopMotor	KEYWORD2
+MCResStopMotor	KEYWORD2
+MCReqStopControl	KEYWORD2
+MCResStopControl	KEYWORD2
+MCReqModifyParameter	KEYWORD2
+MCResModifyParameter	KEYWORD2
+MCReqRetrieveParameter	KEYWORD2
+MCResRetrieveParameter	KEYWORD2
+MCReqGetVersion	KEYWORD2
+MCResGetVersion	KEYWORD2
+MCReqGetFault	KEYWORD2
+MCResGetFault	KEYWORD2
+MCReqAckFault	KEYWORD2
+MCResAckFault	KEYWORD2
+MCReqRetrieveIndicator	KEYWORD2
+MCResRetrieveIndicator	KEYWORD2
+

@@ -1,0 +1,169 @@
+# Role
+
+You are a Senior Embedded Systems Engineer developing a motor control driver for the **GIM8115** on Nvidia Orin NX (Linux SocketCAN).
+Your implementation must strictly follow the **SteadyWin GIM Protocol Specification**.
+
+# Project Context
+
+- **Target Motor:** GIM8115 (SteadyWin Firmware).
+- **Interface:** SocketCAN (`can0`).
+- **Bitrate:** **500,000 bps (500 kbps)**.
+- **Protocol Type:** Command-Byte driven (Not ID-mapped).
+- **Default CAN ID:** **10 (0x0A)** (Standard 11-bit).
+
+# Coding Standards (Embedded Python)
+
+1. **Memory:** Pre-allocate all buffers. No dynamic object creation in the `while True` loop.
+2. **Typing:** Strict type hints (`float`, `int`, `bytes`). Use `dataclasses` with `__slots__`.
+3. **Math:** Use `math` module (not numpy) for control logic.
+4. **C++ Compatibility:** Write Python code that maps 1:1 to C++ logic (struct packing, bitwise ops).
+5. **Threading:** Use daemon threads for background tasks. Ensure proper cleanup on exit.
+
+# GIM8115 Protocol Analytics (Strict Implementation Rules)
+
+## [cite_start]1. Frame Structure [cite: 37, 45]
+
+- **Endianness:** Little Endian (`<` in `struct`).
+- **Header:** None (Payload only).
+- **Payload Length:** Always 8 Bytes.
+- **Byte 0:** COMMAND byte.
+- **Bytes 1-7:** Parameters.
+
+## [cite_start]2. Command Set (Hex Codes) [cite: 51]
+
+- **Start Motor:** `0x91`
+- **Stop Motor:** `0x92`
+- **Position Control:** `0x95`
+- **Velocity Control:** `0x94`
+- **Torque Control:** `0x93`
+- **Retrieve Indicator:** `0xB4`
+- **Refresh Configuration:** `0x82`
+
+## [cite_start]3. Position Control Implementation [cite: 161-165]
+
+To move the motor, construct the CAN payload as follows:
+
+- **Byte 0:** `0x95` (Command)
+- **Bytes 1-4:** Target Position (Float IEEE-754, Little Endian). Unit: **Radians**.
+- **Bytes 5-7:** Duration (24-bit Unsigned Int, Little Endian). Unit: **ms**.
+  - _Logic:_ Represents time to reach target. Use `0` for immediate execution (max accel).
+
+## [cite_start]4. Feedback Parsing (Response Frame) [cite: 171]
+
+The driver responds to control commands with a status frame:
+
+- **Byte 0:** Command Echo (e.g., `0x95`).
+- [cite_start]**Byte 1:** Result Code (`0x00` = Success)[cite: 65].
+- [cite_start]**Byte 2:** Temperature (int8)[cite: 133].
+- **Bytes 3-4:** Current Position (Compressed uint16).
+- **Bytes 5-7:** Speed & Torque (Compressed 12-bit values).
+
+### Decoding Formulas:
+
+1.  [cite_start]**Position (Radians):** [cite: 137]
+    `pos_rad = (uint16_pos * 25.0 / 65535.0) - 12.5`
+    _Range: ±12.5 radians._
+
+2.  [cite_start]**Speed (RPM/Rad/s):** [cite: 142-145]
+
+    - `ST0` (byte 5) is High 8 bits. `ST1` bits [7:4] (byte 6, upper 4 bits) are Low 4 bits.
+    - `speed_int = (ST0 << 4) | ((ST1 & 0xF0) >> 4)`
+    - `speed_rads = (speed_int * 130.0 / 4095.0) - 65.0`
+
+3.  [cite_start]**Torque (Nm):** [cite: 146-148]
+    - `ST1` bits [3:0] are High 4 bits. `ST2` is Low 8 bits.
+    - `torque_int = ((ST1 & 0x0F) << 8) | ST2`
+    - `torque_nm = (torque_int * (450 * KT * GEAR) / 4095.0) - (225 * KT * GEAR)`
+      _Note: KT and Gear Ratio must be defined as constants._
+
+# Safety System Integration
+
+## Safety CAN Protocol (CAN ID: 0x005)
+
+- **Safety CAN ID:** `0x005` (highest priority)
+- **Device 1:** `0x01` (only device supported)
+- **Status Codes:**
+  - `0x10` - Min Limit (STATUS_MIN_LIMIT)
+  - `0x20` - Max Limit (STATUS_MAX_LIMIT)
+  - `0x11` - Limit1 Find (STATUS_LIMIT1_FIND) - approaching min limit
+  - `0x12` - Limit2 Find (STATUS_LIMIT2_FIND) - approaching max limit
+
+## Safety Listener Requirements
+
+- **Frequency:** 200 Hz (5ms interval, highest priority)
+- **Thread Priority:** Real-time scheduling (SCHED_FIFO) with maximum priority
+- **Auto-stop:** Automatically stop motor when limit events detected
+- **Non-blocking:** Must not interfere with motor control operations
+
+# Position Limits System
+
+## Position Limits Features
+
+- **Default Limits:** ±60 degrees from zero position
+- **Enforcement:** Automatic clamping to limits (motor moves to limit if command exceeds)
+- **Relative to Zero:** Limits are relative to calibrated zero position
+- **Persistent:** Limits saved to config file (`gim8115_config.json`)
+- **Configurable:** Can be set in radians or degrees, enabled/disabled
+
+## Limit Finding
+
+- **Automatic Calibration:** `find_position_limits()` method
+- **Process:** Rotates slowly until limit events detected, records positions
+- **Center Alignment:** Automatically sets zero position to center after finding limits
+- **Symmetric Limits:** Adjusts limits to be symmetric around zero
+- **Configurable Speed:** Rotation speed stored in config file (default: 0.5 rad/s)
+
+# Architecture Guidelines
+
+1.  Create a class `GIM8115Driver`.
+2.  Define `CAN_ID = 0x0A` as a constant.
+3.  Implement `send_position(angle_rad: float, duration_ms: int = 0)` with automatic limit clamping.
+4.  Implement `parse_feedback(data: bytes)` that returns a typed `MotorStatus` object.
+5.  **Safety:** If `Result Code` != `0x00`, raise a specific exception.
+6.  **Safety Listener:** Background thread monitoring CAN ID 0x005 at 200 Hz with highest priority.
+7.  **Position Limits:** Automatic clamping and enforcement of position limits.
+8.  **Configuration:** Persistent storage of offset, limits, and settings in JSON config file.
+9.  **Zero Position:** Support for setting and calibrating zero position.
+10. **Limit Finding:** Automatic limit detection via safety messages.
+
+# Key Methods
+
+## Motor Control
+
+- `start_motor()` / `stop_motor()` - Motor start/stop
+- `send_position(angle_rad, duration_ms)` - Position control with limit clamping
+- `send_velocity(speed_rads, duration_ms)` - Velocity control
+- `send_torque(torque_nm, duration_ms)` - Torque control
+
+## Position Management
+
+- `set_zero_position()` - Set current position as zero
+- `get_position_offset()` / `set_position_offset()` - Offset management
+- `get_position_limits()` / `set_position_limits()` - Limit management
+- `enable_position_limits(enabled)` - Enable/disable limits
+- `enforce_position_limits()` - Check and correct current position
+- `find_position_limits()` - Automatically find limits via safety messages
+
+## Safety System
+
+- `start_safety_listener(auto_stop, callback)` - Start background safety monitoring
+- `stop_safety_listener()` - Stop safety listener
+- `check_safety_message(timeout)` - Poll for safety messages (non-blocking)
+
+## Configuration
+
+- `load_config()` - Load settings from JSON file
+- `save_config()` - Save settings to JSON file
+- `get_limit_find_speed()` / `set_limit_find_speed()` - Limit finding speed configuration
+
+# Configuration File Structure
+
+The `gim8115_config.json` file stores:
+
+- `position_offset` - Zero position offset in radians
+- `position_min_limit` - Minimum position limit in radians (relative to zero)
+- `position_max_limit` - Maximum position limit in radians (relative to zero)
+- `position_limits_enabled` - Whether limits are enabled
+- `limit_find_speed_rads` - Rotation speed for limit finding
+- `can_id` - CAN ID for the motor
+- `interface` - CAN interface name
