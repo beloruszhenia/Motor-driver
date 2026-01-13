@@ -20,8 +20,8 @@ def main():
     """Example motor control sequence"""
     
     # Motor parameters (adjust based on your motor specifications)
-    TORQUE_CONSTANT = 0.1  # N⋅m/A (example value, check motor datasheet)
-    GEAR_RATIO = 10.0  # Example gear ratio
+    TORQUE_CONSTANT = 1 # N⋅m/A (example value, check motor datasheet)
+    GEAR_RATIO = 36  # Example gear ratio
     
     # Initialize driver
     # Using context manager for automatic connection/disconnection

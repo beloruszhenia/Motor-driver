@@ -174,6 +174,12 @@ class GIM8115Driver:
         self._safety_callback: Optional[Callable[[int, int], None]] = None
         self._auto_stop_on_limit: bool = True  # Automatically stop motor on limit trigger
         
+        # Status monitoring state
+        self._status_monitor_thread: Optional[threading.Thread] = None
+        self._status_monitor_running: bool = False
+        self._status_callback: Optional[Callable[[MotorStatus], None]] = None
+        self._status_monitor_rate: float = 10.0  # Hz (10 times per second)
+        
     def load_config(self) -> None:
         """
         Load configuration from file (position offset and limits)
@@ -322,7 +328,8 @@ class GIM8115Driver:
         Check current motor position and move to nearest limit if beyond limits
         
         Args:
-            duration_ms: Duration to reach limit position in milliseconds
+            duration_ms: Total time from start to stop in milliseconds (acceleration + deceleration).
+                        Example: 100ms = 50ms acceleration + 50ms deceleration.
             
         Returns:
             True if motor was moved to limit, False if already within limits or limits disabled
@@ -594,8 +601,8 @@ class GIM8115Driver:
             center_position = 0.0  # Center is now at zero (relative to new offset)
             try:
                 self.start_motor()
-                time.sleep(0.2)
-                self.send_position(center_position, duration_ms=2000)  # Move to center over 2 seconds
+                time.sleep(0.05)
+                self.send_position(center_position, duration_ms=100)  # Move to center over 2 seconds
                 time.sleep(2.5)  # Wait for movement to complete
                 self.stop_motor()
                 print("✓ Motor moved to center position")
@@ -642,6 +649,7 @@ class GIM8115Driver:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit"""
         self.stop_safety_listener()
+        self.stop_status_monitor()
         self.disconnect()
         
     def connect(self) -> None:
@@ -773,7 +781,8 @@ class GIM8115Driver:
         Pack duration (24-bit unsigned int) into bytes 5-7 of tx_buffer
         
         Args:
-            duration_ms: Duration in milliseconds
+            duration_ms: Total time from start to stop in milliseconds (acceleration + deceleration).
+                        Example: 100ms = 50ms acceleration + 50ms deceleration.
         """
         duration_bytes = struct.pack('<I', duration_ms & 0xFFFFFF)
         self._tx_buffer[5] = duration_bytes[0]
@@ -786,7 +795,9 @@ class GIM8115Driver:
         
         Args:
             angle_rad: Target position in radians (relative to calibrated zero)
-            duration_ms: Duration to reach target in milliseconds (0 = max speed)
+            duration_ms: Total time from start to stop in milliseconds (acceleration + deceleration).
+                        Example: 100ms = 50ms acceleration + 50ms deceleration.
+                        Use 0 for immediate execution (max acceleration, no deceleration planning).
             
         Note:
             If position limits are enabled, the position will be clamped to the nearest limit.
@@ -811,7 +822,9 @@ class GIM8115Driver:
         
         Args:
             speed_rads: Target speed in rad/s
-            duration_ms: Duration in milliseconds (0 = immediate)
+            duration_ms: Total time from start to stop in milliseconds (acceleration + deceleration).
+                        Example: 100ms = 50ms acceleration + 50ms deceleration.
+                        Use 0 for immediate execution (max acceleration, no deceleration planning).
         """
         self._tx_buffer[0] = CMD_VELOCITY_CONTROL
         struct.pack_into('<f', self._tx_buffer, 1, speed_rads)
@@ -825,7 +838,9 @@ class GIM8115Driver:
         
         Args:
             torque_nm: Target torque in N⋅m
-            duration_ms: Duration in milliseconds (0 = immediate)
+            duration_ms: Total time from start to stop in milliseconds (acceleration + deceleration).
+                        Example: 100ms = 50ms acceleration + 50ms deceleration.
+                        Use 0 for immediate execution (max acceleration, no deceleration planning).
         """
         self._tx_buffer[0] = CMD_TORQUE_CONTROL
         struct.pack_into('<f', self._tx_buffer, 1, torque_nm)
@@ -888,6 +903,64 @@ class GIM8115Driver:
             Current absolute position in radians, or None if no response
         """
         return self.retrieve_indicator(INDIID_MEC_ANGLE_SHAFT, timeout=timeout)
+    
+    def get_current_speed(self, timeout: float = 1.0) -> Optional[float]:
+        """
+        Get current speed from motor using Retrieve Indicator command
+        Uses command 0xB4 with IndID 0x14 (Speed of Output Shaft)
+        
+        Args:
+            timeout: Timeout in seconds
+            
+        Returns:
+            Current speed in rad/s, or None if no response
+        """
+        return self.retrieve_indicator(INDIID_SPEED_SHAFT, timeout=timeout)
+    
+    def get_motor_status(self, timeout: float = 0.1) -> Optional[MotorStatus]:
+        """
+        Get full motor status (position, speed, torque, error) efficiently
+        
+        Uses retrieve_indicator for position and speed, which doesn't affect motor state.
+        This is safe for continuous 10 Hz monitoring.
+        
+        Args:
+            timeout: Timeout in seconds (should be short for 10 Hz polling, default: 0.1s)
+            
+        Returns:
+            MotorStatus object with position and speed data, or None if no response or error
+            Note: Temperature and torque are set to 0 (not available via indicators)
+            Error status (result_code) is RES_SUCCESS if data is available
+        """
+        try:
+            # Get position and speed using retrieve_indicator (non-intrusive, doesn't affect motor)
+            # This is the safest method for continuous monitoring
+            # Use shorter timeout per call to ensure we don't block too long
+            position = self.retrieve_indicator(INDIID_MEC_ANGLE_SHAFT, timeout=timeout/2)
+            # Small delay to avoid race condition with CAN bus responses
+            time.sleep(0.01)  # 10ms delay
+            speed = self.retrieve_indicator(INDIID_SPEED_SHAFT, timeout=timeout/2)
+            
+            if position is None:
+                return None  # Position is required
+            
+            # Speed might be None if motor is not responding, use 0.0 as default
+            if speed is None:
+                speed = 0.0
+            
+            # Construct MotorStatus object
+            return MotorStatus(
+                command_echo=CMD_RETRIEVE_INDICATOR,
+                result_code=RES_SUCCESS,  # Indicators return success if data is available
+                temperature=0,  # Not available via indicators
+                position_rad=position,
+                speed_rads=speed,
+                torque_nm=0.0,  # Not available via indicators
+                torque_raw=0.0  # Not available via indicators
+            )
+        except Exception as e:
+            # Don't print here - let the monitor loop handle logging
+            return None
         
     def set_zero_position(self) -> None:
         """
@@ -1140,4 +1213,83 @@ class GIM8115Driver:
                 self._safety_listener_thread.join(timeout=1.0)
                 self._safety_listener_thread = None
             print("Safety listener stopped")
+    
+    def _status_monitor_loop(self):
+        """
+        Background thread loop for monitoring motor status at 10 Hz
+        Reads position, speed, and error status
+        """
+        # 10 Hz = 100ms interval
+        CHECK_INTERVAL = 1.0 / self._status_monitor_rate  # 0.1 seconds for 10 Hz
+        
+        consecutive_failures = 0
+        max_failures = 10  # Warn after 10 consecutive failures
+        
+        while self._status_monitor_running:
+            try:
+                # Get motor status (position, speed, error)
+                # Use longer timeout to ensure we get responses (80ms allows 40ms per indicator)
+                status = self.get_motor_status(timeout=0.08)  # 80ms timeout
+                if status is not None:
+                    consecutive_failures = 0  # Reset failure counter on success
+                    if self._status_callback is not None:
+                        try:
+                            self._status_callback(status)
+                        except Exception as e:
+                            print(f"Error in status callback: {e}")
+                else:
+                    # Status is None - might be timeout or error
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        print(f"⚠️  Status monitor: {consecutive_failures} consecutive failures (timeout or no response)")
+                        consecutive_failures = 0  # Reset to avoid spam
+            except Exception as e:
+                # Log exception but continue running
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    print(f"⚠️  Status monitor error: {e}")
+                    consecutive_failures = 0  # Reset to avoid spam
+            
+            time.sleep(CHECK_INTERVAL)
+    
+    def start_status_monitor(
+        self,
+        rate_hz: float = 10.0,
+        callback: Optional[Callable[[MotorStatus], None]] = None
+    ) -> None:
+        """
+        Start background thread to monitor motor status (position, speed, error) at specified rate
+        
+        Args:
+            rate_hz: Monitoring rate in Hz (default: 10.0 = 10 times per second)
+            callback: Optional callback function(status: MotorStatus) called when status is received
+        """
+        if self._bus is None:
+            raise GIM8115Error("Not connected to CAN bus. Call connect() first.")
+        
+        if self._status_monitor_running:
+            # Already running, update settings
+            self._status_monitor_rate = rate_hz
+            self._status_callback = callback
+            return
+        
+        self._status_monitor_rate = rate_hz
+        self._status_callback = callback
+        self._status_monitor_running = True
+        self._status_monitor_thread = threading.Thread(
+            target=self._status_monitor_loop,
+            daemon=True,
+            name="StatusMonitor"
+        )
+        self._status_monitor_thread.start()
+        print(f"Status monitor started (monitoring at {rate_hz} Hz)")
+    
+    def stop_status_monitor(self) -> None:
+        """Stop the background status monitor thread"""
+        if self._status_monitor_running:
+            self._status_monitor_running = False
+            if self._status_monitor_thread is not None:
+                self._status_monitor_thread.join(timeout=1.0)
+                self._status_monitor_thread = None
+            print("Status monitor stopped")
 

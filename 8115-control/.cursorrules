@@ -10,6 +10,7 @@ Your implementation must strictly follow the **SteadyWin GIM Protocol Specificat
 - **Bitrate:** **500,000 bps (500 kbps)**.
 - **Protocol Type:** Command-Byte driven (Not ID-mapped).
 - **Default CAN ID:** **10 (0x0A)** (Standard 11-bit).
+- **Gear Ratio:** **36** (motor gear ratio constant).
 
 # Coding Standards (Embedded Python)
 
@@ -46,7 +47,9 @@ To move the motor, construct the CAN payload as follows:
 - **Byte 0:** `0x95` (Command)
 - **Bytes 1-4:** Target Position (Float IEEE-754, Little Endian). Unit: **Radians**.
 - **Bytes 5-7:** Duration (24-bit Unsigned Int, Little Endian). Unit: **ms**.
-  - _Logic:_ Represents time to reach target. Use `0` for immediate execution (max accel).
+  - _Logic:_ Represents total time from start to stop (acceleration + deceleration).
+  - _Duration Behavior:_ When `duration_ms = 100`, the motor uses 50ms for acceleration and 50ms for deceleration.
+  - Use `0` for immediate execution (max acceleration, no deceleration planning).
 
 ## [cite_start]4. Feedback Parsing (Response Frame) [cite: 171]
 
@@ -132,8 +135,11 @@ The driver responds to control commands with a status frame:
 
 - `start_motor()` / `stop_motor()` - Motor start/stop
 - `send_position(angle_rad, duration_ms)` - Position control with limit clamping
+  - `duration_ms`: Total time from start to stop (acceleration + deceleration). Example: 100ms = 50ms accel + 50ms decel
 - `send_velocity(speed_rads, duration_ms)` - Velocity control
+  - `duration_ms`: Total time from start to stop (acceleration + deceleration). Example: 100ms = 50ms accel + 50ms decel
 - `send_torque(torque_nm, duration_ms)` - Torque control
+  - `duration_ms`: Total time from start to stop (acceleration + deceleration). Example: 100ms = 50ms accel + 50ms decel
 
 ## Position Management
 

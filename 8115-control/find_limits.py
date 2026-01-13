@@ -50,14 +50,7 @@ def main():
             motor.start_safety_listener(auto_stop=True)
             print("   ✓ Safety listener started")
             
-            print("\n3. Finding position limits...")
-            print("   The motor will:")
-            print("   - Rotate left until safety limit1 (0x11) is detected")
-            print("   - Then rotate right until safety limit2 (0x12) is detected")
-            print("   - Apply ±5° safety shift to create safe operating limits")
-            print("   - Limits will be automatically saved to config")
-            print("   Starting now...")
-            
+                
             # Find limits using configured speed from config file
             # Speed can be configured via: motor.set_limit_find_speed(speed_rads)
             print(f"   Using rotation speed: {motor.get_limit_find_speed():.2f} rad/s (~{math.degrees(motor.get_limit_find_speed()):.1f} deg/s)")
@@ -71,28 +64,20 @@ def main():
             print(f"   Maximum limit: {math.degrees(max_limit):.2f}° ({max_limit:.4f} rad)")
             print(f"   Total range: {math.degrees(max_limit - min_limit):.2f}°")
             
-            # Verify limits
+            # Verify limits from driver
             saved_min, saved_max = motor.get_position_limits()
-            print(f"\n   Verified limits from config:")
-            print(f"   Min: {math.degrees(saved_min):.2f}°")
-            print(f"   Max: {math.degrees(saved_max):.2f}°")
+            print(f"\n   Verified limits from driver:")
+            print(f"   Min: {math.degrees(saved_min):.2f}° ({saved_min:.4f} rad)")
+            print(f"   Max: {math.degrees(saved_max):.2f}° ({saved_max:.4f} rad)")
             
-            print("\n5. Testing limits...")
-            print("   Moving to minimum limit...")
-            motor.stop_motor()
-            motor.start_motor()
-            time.sleep(0.1)            
-            motor.send_position(min_limit, duration_ms=300)
-            time.sleep(2)
+            # Check if limits match
+            if abs(saved_min - min_limit) > 0.001 or abs(saved_max - max_limit) > 0.001:
+                print(f"   ⚠️  Warning: Limits don't match! Using returned values.")
+                print(f"      Returned: min={math.degrees(min_limit):.2f}°, max={math.degrees(max_limit):.2f}°")
+                print(f"      Saved: min={math.degrees(saved_min):.2f}°, max={math.degrees(saved_max):.2f}°")
+            else:
+                print(f"   ✓ Limits match!")                                   
             
-            print("   Moving to maximum limit...")
-            motor.send_position(max_limit, duration_ms=300)
-            time.sleep(2)
-            
-            print("   Moving back to center...")
-            center = (min_limit + max_limit) / 2
-            motor.send_position(center, duration_ms=300)
-            time.sleep(2)
             
             motor.stop_motor()
             print("\n✓ Limit finding completed successfully!")

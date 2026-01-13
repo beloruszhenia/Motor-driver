@@ -44,17 +44,17 @@ motor.connect()
 try:
     # Start motor
     motor.start_motor()
-    
+
     # Move to 45 degrees in 2 seconds
     motor.send_position(angle_rad=math.pi/4, duration_ms=2000)
-    
+
     # Receive feedback
     response = motor._receive_frame(timeout=2.5)
     if response:
         status = motor.parse_feedback(response)
         print(f"Position: {math.degrees(status.position_rad):.2f}°")
         print(f"Speed: {status.speed_rads:.2f} rad/s")
-    
+
     # Stop motor
     motor.stop_motor()
 finally:
@@ -89,8 +89,11 @@ with GIM8115Driver(interface="can0", can_id=0x01) as motor:
 - `start_motor()`: Start the motor
 - `stop_motor()`: Stop the motor
 - `send_position(angle_rad: float, duration_ms: int)`: Position control
+  - `duration_ms`: Total time from start to stop (acceleration + deceleration). Example: 100ms = 50ms accel + 50ms decel
 - `send_velocity(speed_rads: float, duration_ms: int)`: Velocity control
+  - `duration_ms`: Total time from start to stop (acceleration + deceleration). Example: 100ms = 50ms accel + 50ms decel
 - `send_torque(torque_nm: float, duration_ms: int)`: Torque control
+  - `duration_ms`: Total time from start to stop (acceleration + deceleration). Example: 100ms = 50ms accel + 50ms decel
 - `set_zero_position()`: Set current position as zero
 - `parse_feedback(data: bytes, check_result: bool = True) -> MotorStatus`: Parse feedback frame
 - `_receive_frame(timeout: float = 1.0) -> Optional[bytes]`: Receive CAN frame
@@ -120,6 +123,9 @@ Dataclass containing motor feedback:
 - **Byte 0**: `0x95` (Command)
 - **Bytes 1-4**: Target position (float, little-endian, radians)
 - **Bytes 5-7**: Duration (24-bit unsigned int, little-endian, milliseconds)
+  - Total time from start to stop (acceleration + deceleration)
+  - Example: 100ms = 50ms acceleration + 50ms deceleration
+  - Use 0 for immediate execution (max acceleration)
 
 ### Feedback Frame
 
@@ -132,17 +138,20 @@ Dataclass containing motor feedback:
 ### Decoding Formulas
 
 **Position:**
+
 ```
 pos_rad = (uint16_pos * 25.0 / 65535.0) - 12.5
 ```
 
 **Speed:**
+
 ```
 speed_int = (ST0 << 4) | (ST1 >> 4)
 speed_rads = (speed_int * 130.0 / 4095.0) - 65.0
 ```
 
 **Torque:**
+
 ```
 torque_int = ((ST1 & 0x0F) << 8) | ST2
 torque_nm = (torque_int * (450 * KT * GEAR) / 4095.0) - (225 * KT * GEAR)
@@ -163,6 +172,7 @@ ip link show can0
 ## Examples
 
 See `example_usage.py` for comprehensive examples including:
+
 - Position control
 - Velocity control
 - Torque control
@@ -172,4 +182,3 @@ See `example_usage.py` for comprehensive examples including:
 ## License
 
 This implementation follows the SteadyWin GIM Protocol Specification.
-
